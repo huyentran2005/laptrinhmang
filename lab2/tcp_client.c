@@ -32,7 +32,12 @@ int main(int argc, char *argv[]){
         perror("connect() failed");
         exit(1);
     }
-
+    char welcome_buf[1024];
+    int n = recv(client, welcome_buf, sizeof(welcome_buf) - 1, 0);
+    if (n > 0) {
+        welcome_buf[n] = '\0';
+        printf("Noi dung file chao tu Server:\n%s\n", welcome_buf);
+    }
     while(1){
         char buf[256];
         printf("Nhap du lieu:\n");
