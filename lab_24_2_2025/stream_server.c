@@ -44,14 +44,16 @@ int main(int argc, char *argv[]){
             perror("recv() failed");
             break;
         }
-        buf[ret] = '\0';
+        
+        if(strcspn(buf,"\n")) buf[strcspn(buf,"\n")]= 0;
+        else buf[ret] = '\0';
         if(strlen(endbuf) > 0){
             strcpy(tmp, endbuf);
             strcat(tmp, buf);
         } else {
             strcpy(tmp, buf);
         }
-
+        
         char *p = tmp;
         while((p= strstr(p, s)) != NULL){
             count++;
