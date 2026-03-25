@@ -48,7 +48,7 @@ int main(int argc, char * argv[]){
         if(stat(entry->d_name, &fileStat)==0){
             if(S_ISREG(fileStat.st_mode)){
                 char buf[256];
-                snprintf(buf, sizeof(buf), "%-30s %-15ld", entry->d_name, (long)fileStat.st_size);
+                snprintf(buf, sizeof(buf), "%-30s %ld bytes\n", entry->d_name, (long)fileStat.st_size);
                 send(client, buf, strlen(buf),0);
             }
         }
