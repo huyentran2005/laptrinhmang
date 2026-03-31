@@ -66,12 +66,10 @@ int main() {
             ioctl(client, FIONBIO, &ul); // Thiết lập client socket là non-blocking
             clients[nclients++] = client;
 
-            // YÊU CẦU 1: Khi có client kết nối, server gửi thông điệp hỏi thông tin
             char *welcome = "Vui long nhap 'Ho ten' va 'MSSV' (VD: Nguyen Van An 20201234):\n";
             send(client, welcome, strlen(welcome), 0);
         }
 
-        // 2. Kiểm tra dữ liệu từ các client đã kết nối
         for (int i = 0; i < nclients; i++) {
             len = recv(clients[i], buf, sizeof(buf) - 1, 0);
             
@@ -94,8 +92,7 @@ int main() {
                 trim(buf);
                 printf("Received from %d: %s\n", clients[i], buf);
 
-                // YÊU CẦU 2: Xử lý dữ liệu để tạo email sinh viên ĐHBK
-                // Giả sử định dạng nhập: [Họ] [Tên đệm] [Tên] [MSSV]
+               
                 char *words[16];
                 int count = 0;
                 char *token = strtok(buf, " ");
@@ -120,9 +117,14 @@ int main() {
                     
                     // Chuyển tên về chữ thường
                     for (int j = 0; name[j]; j++) name[j] = tolower(name[j]);
+                    
+                    char *short_mssv = mssv;
+                    if (strlen(mssv) >= 8) {
+                        short_mssv = mssv + 2; 
+                    }
 
                     // Tạo email theo cấu trúc: ten.hotatMSSV@sis.hust.edu.vn
-                    sprintf(email, "Email cua ban: %s.%s%s@sis.hust.edu.vn\n", name, initials, mssv);
+                    sprintf(email, "Email cua ban: %s.%s%s@sis.hust.edu.vn\n", name, initials, short_mssv);
                     send(clients[i], email, strlen(email), 0);
                 } else {
                     char *err = "Dinh dang sai! Hay nhap: Ho Ten MSSV\n";
@@ -130,7 +132,7 @@ int main() {
                 }
             }
         }
-        // Nghỉ một chút để tránh chiếm dụng 100% CPU trong vòng lặp vô hạn
+        //tránh chiếm dụng 100% CPU trong vòng lặp vô hạn
         usleep(10000); 
     }
 
