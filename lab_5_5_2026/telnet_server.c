@@ -75,7 +75,6 @@ int main() {
 
     while (1) {
         int client = accept(listener, NULL, NULL);
-        printf("New client connected: %d\n", client);
         if (fork() == 0) {
             // Xu ly trong tien trinh con
             close(listener);
