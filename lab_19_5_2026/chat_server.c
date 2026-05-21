@@ -2,88 +2,86 @@
 #include<string.h>
 #include<stdlib.h>
 #include<sys/types.h>
-#include<pthread.h>
 #include<sys/socket.h>
 #include<arpa/inet.h>
-#include<unistd.h>
-
+#include<pthread.h>
+#include <unistd.h>
+#include<time.h>
 
 struct User{
-    int id;
-    int joined;
+    int client_id;
+    char id[30];
+    char name[50];
+    int open;
 };
-int numClients = 0;
+int numClient;
 struct User users[100];
-pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-int find_pair(int client){
-    for(int i =0; i< numClients; i++){
-        if(client == users[i].id){
-            if(i%2 == 0){
-                if(i+1 < numClients && users[i+1].joined == 1) return i+1;
-                else return -1;
-            } else{
-                if(i-1 >=0 && users[i-1].joined == 1) return i-1;
-                else return -1;
-            }
-        }
-    }
-    return -1;
-}
+void *thread_proc(void *arg);
+int check_and_get_info(char *buf, char*id, char*name){
+    char *token = strtok(buf, ":");
+    if(token == NULL || strchr(token, ' '))
+        return 0;
+    strcpy(id, token);
+    token = strtok(NULL, ":");
+    if(token == NULL)
+        return 0;
 
-void close_pair(int client){
-    int idx_pair = find_pair(client);
-    close(client);
-    close(users[idx_pair].id);
-    users[idx_pair] = users[numClients - 1];
-    numClients--;
-    if(idx_pair %2 ==0){
-        if(idx_pair+1 <numClients){
-            users[idx_pair + 1] = users[numClients - 1];
-            numClients--;
-        }
-    } else{
-        if(idx_pair-1 >=0){
-            users[idx_pair - 1] = users[numClients - 1];
-            numClients--;
-        }
-    }
-    
+    while(*token == ' ')
+        token++;
+    strcpy(name, token);
+    name[strcspn(name, "\n")] = 0;
+    if(name[0] == '\0' || strchr(name, ' '))
+        return 0;
+    return 1;
+
 }
-void* thread_proc(void *arg);
+int is_exist(char *id){
+    for(int i=0; i< numClient;i++){
+        if(users[i].open && strcmp(id, users[i].id) == 0) return 1;
+    }
+    return 0;
+}
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 int main(){
-    int listener = socket(AF_INET, SOCK_STREAM,IPPROTO_TCP);
+    setenv("TZ", "Asia/Ho_Chi_Minh", 1);
+    tzset();
+    int listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if(listener == -1){
         perror("listener() failed");
         exit(1);
     }
-    if(setsockopt(listener,SOL_SOCKET,SO_REUSEADDR, &(int){1},sizeof(int))){
+    if(setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int))){
         perror("setsockopt() failed");
-        close(listener);
         exit(1);
     }
-    struct sockaddr_in addr ;
+
+    struct sockaddr_in addr = {0};
     addr.sin_port = htons(9000);
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    if(bind(listener,(struct sockaddr *)&addr, sizeof(addr))){
+
+    if(bind(listener, (struct sockaddr *)&addr, sizeof(addr))){
         perror("bind() failed");
         exit(1);
     }
-    if(listen(listener,5)){
+
+    if(listen(listener, 5)){
         perror("listen() failed");
         exit(1);
     }
     printf("Server is listening on port 9000...\n");
     pthread_t thread_id;
+
     while(1){
         int client = accept(listener, NULL, NULL);
+        users[numClient].client_id = client;
+        strcpy(users[numClient].id, "\0");
+        strcpy(users[numClient].name,"\0");
+        users[numClient].open = 0;
+        numClient++;
         printf("New client connected: %d\n", client);
-        
-        users[numClients].id = client;
-        users[numClients].joined = 1;
-        numClients++;
         pthread_create(&thread_id, NULL, thread_proc, &client);
-        pthread_detach(thread_id);
+
     }
     return 0;
 }
@@ -91,26 +89,63 @@ int main(){
 void *thread_proc(void *arg){
     int client = *(int *)arg;
     char buf[256];
+    char msg[1000];
+    char id[50];
+    char name[50];
+    int idx_user;
+    strcpy(msg,"Đăng nhập theo cú pháp \"client_id: client_name\": ");
+    send(client, msg, strlen(msg), 0);
     while(1){
-       
-        int ret = recv(client, buf, sizeof(buf), 0);
-        if(ret <= 0) break;
-        buf[ret]=0;
-        if(strncmp(buf, "exit",4) ==0){
+        int ret = recv(client, buf, sizeof(buf),0);
+        if(ret <= 0){
+            perror("recv() failed");
             break;
-        } 
-        pthread_mutex_lock(&lock);
-        int idx_pair = find_pair(client);
-        pthread_mutex_unlock(&lock);
-        char msg[1024];
-        if(idx_pair == -1){
-            strcpy(msg,"Error: No pair\n");
-            send(client, msg, strlen(msg), 0);
+        }
+        buf[ret] =0;
+        int flag = 0;
+        for(int i=0 ; i< numClient; i++){
+            if(users[i].client_id == client){
+                if(users[i].open == 0) flag = 1;
+                idx_user = i;
+            }
+        }
+        if(flag){
+            pthread_mutex_lock(&lock);
+            int check = check_and_get_info(buf, id, name);
+            pthread_mutex_unlock(&lock);
+            if(check){
+                if(is_exist(id)){
+                    strcpy(msg,"ID đã tồn tại!\n");
+                    send(client, msg, strlen(msg), 0);
+                    strcpy(msg,"Nhập theo cú pháp \"client_id: client_name\": ");
+                    send(client, msg, strlen(msg), 0);
+                } else{
+                    strcpy(users[idx_user].id,id);
+                    strcpy(users[idx_user].name,name);
+                    users[idx_user].open =1;
+                    printf("Client có id %d đã tham gia đoạn chat\n",client);
+                    strcpy(msg,"---------Chatting--------\n");
+                    send(client, msg, strlen(msg), 0);
+                }
+            } else{
+                strcpy(msg,"Đăng nhập lỗi!\nNhập theo cú pháp \"client_id: client_name\": ");
+                send(client, msg, strlen(msg), 0);
+            }
             continue;
         }
-        
-        sprintf(msg,">> Client id %d: %s",users[idx_pair].id, buf);
-        send(users[idx_pair].id, msg, strlen(msg), 0);
+        for(int i=0; i< numClient; i++){
+            if(i != idx_user){
+                if(users[i].open){
+                    time_t now;
+                    time(&now);
+                    struct tm *info = localtime(&now);
+                    sprintf(msg, "%04d/%02d/%02d %02d:%02d:%02d %s: %s",info->tm_year + 1900, info->tm_mon +1, info->tm_mday, info->tm_hour,info->tm_min, info->tm_sec,users[idx_user].id, buf); 
+                    send(users[i].client_id, msg, strlen(msg), 0);
+                }
+            }
+        }
     }
-    close_pair(client);
+    close(client);
+    users[idx_user] = users[numClient-1];
+    numClient--;
 }
