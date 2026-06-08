@@ -21,7 +21,7 @@ double mul(double a, double b) {
 double divide(double a, double b) {
     if (b == 0) {
         fprintf(stderr, "Error: Division by zero\n");
-        return 0; // Return 0 or handle as needed
+        return 0;
     }
     return a / b;
 }
@@ -38,37 +38,45 @@ func get_operation(const char op) {
     }
 }
 
+#define CORS_HEADERS \
+    "Access-Control-Allow-Origin: *\r\n" \
+    "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n" \
+    "Access-Control-Allow-Headers: Content-Type\r\n"
+
 void handle_method_get(int client, const char *path) {
     char op;
     double a, b;
     if (sscanf(path, "/calc?op=%c&a=%lf&b=%lf", &op, &a, &b) != 3) {
-        char response[] = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Bad Request</h1></body></html>";
+        char response[] = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n" CORS_HEADERS "\r\n<html><body><h1>Bad Request</h1></body></html>";
         send(client, response, strlen(response), 0);
         return;
     }
 
     func operation = get_operation(op);
     if (operation == NULL) {
-        char response[] = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Unknown Operator</h1></body></html>";
+        char response[] = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n" CORS_HEADERS "\r\n<html><body><h1>Unknown Operator</h1></body></html>";
         send(client, response, strlen(response), 0);
         return;
     }
 
     double result = operation(a, b);
-    char response[256];
-    snprintf(response, sizeof(response), "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Result: %.2lf %c %.2lf =  %.2lf</h1></body></html>", a, op, b, result);
+    char response[512];
+    snprintf(response, sizeof(response),
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n" CORS_HEADERS "\r\n"
+        "<html><body><h1>Result: %.2lf %c %.2lf = %.2lf</h1></body></html>",
+        a, op, b, result);
     send(client, response, strlen(response), 0);
 }
 
 void handle_method_post(int client, const char *path, const char *body) {
     if (strncmp(path, "/calc", 5) != 0) {
-        char response[] = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Not Found</h1></body></html>";
+        char response[] = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n" CORS_HEADERS "\r\n<html><body><h1>Not Found</h1></body></html>";
         send(client, response, strlen(response), 0);
         return;
     }
 
     if (body == NULL) {
-        char response[] = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Bad Request</h1></body></html>";
+        char response[] = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n" CORS_HEADERS "\r\n<html><body><h1>Bad Request</h1></body></html>";
         send(client, response, strlen(response), 0);
         return;
     }
@@ -76,21 +84,32 @@ void handle_method_post(int client, const char *path, const char *body) {
     char op;
     double a, b;
     if (sscanf(body, "{\"op\": \"%c\", \"a\": %lf, \"b\": %lf}", &op, &a, &b) != 3) {
-        char response[] = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Bad Request</h1></body></html>";
+        char response[] = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n" CORS_HEADERS "\r\n<html><body><h1>Bad Request</h1></body></html>";
         send(client, response, strlen(response), 0);
         return;
     }
 
     func operation = get_operation(op);
     if (operation == NULL) {
-        char response[] = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Unknown Operator</h1></body></html>";
+        char response[] = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n" CORS_HEADERS "\r\n<html><body><h1>Unknown Operator</h1></body></html>";
         send(client, response, strlen(response), 0);
         return;
     }
 
     double result = operation(a, b);
-    char response[256];
-    snprintf(response, sizeof(response), "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Result: %.2lf %c %.2lf =  %.2lf</h1></body></html>", a, op, b, result);
+    char response[512];
+    snprintf(response, sizeof(response),
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n" CORS_HEADERS "\r\n"
+        "<html><body><h1>Result: %.2lf %c %.2lf = %.2lf</h1></body></html>",
+        a, op, b, result);
+    send(client, response, strlen(response), 0);
+}
+
+void handle_method_options(int client) {
+    char response[] =
+        "HTTP/1.1 204 No Content\r\n"
+        CORS_HEADERS
+        "\r\n";
     send(client, response, strlen(response), 0);
 }
 
@@ -139,28 +158,26 @@ int main() {
         }
         buff[n] = '\0';
 
-        // METHOD PATH HTTP/1.1
-        // GET: path: /calc?op=+&a=5&b=3
-        // POST: path: /calc, body json: {"op": "+", "a": 5, "b": 3}
         char method[10], path[100];
         sscanf(buff, "%9s %99s", method, path);
+
         if (strncmp(method, "GET", 3) == 0) {
             handle_method_get(client, path);
-            close(client);
         }
         else if (strncmp(method, "POST", 4) == 0) {
             char *body = strstr(buff, "\r\n\r\n");
-            if (body) {
-                body += 4;
-            }
+            if (body) body += 4;
             handle_method_post(client, path, body);
-            close(client);
+        }
+        else if (strncmp(method, "OPTIONS", 7) == 0) {
+            handle_method_options(client);
         }
         else {
-            char response[] = "HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Method Not Allowed</h1></body></html>";
+            char response[] = "HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/html\r\n" CORS_HEADERS "\r\n<html><body><h1>Method Not Allowed</h1></body></html>";
             send(client, response, strlen(response), 0);
-            close(client);
         }
+
+        close(client);
     }
     return 0;
 }
