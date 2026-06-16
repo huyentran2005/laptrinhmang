@@ -1,19 +1,30 @@
 /*
- * Chat Client - TCP/IP  (giao diện Terminal)
- * Giao thức theo slide
+ * Chat Client - TCP/IP (giao diện Terminal)
+ * Phản hồi từ server:
+ *   100 OK          - thành công
+ *   200 NICKNAME IN USE
+ *   201 INVALID NICK NAME
+ *   202 UNKNOWN NICKNAME
+ *   203 DENIED
+ *   JOIN <nick>
+ *   MSG <nick> <msg>
+ *   PMSG <nick> <msg>
+ *   OP <nick>
+ *   KICK <kicked> <op>
+ *   TOPIC <op> <topic>
+ *   QUIT <nick>
  *
  * Cách dùng: ./chat_client [host] [port]
- *
  * Lệnh:
- *   /join <nick>          - Tham gia phòng
- *   /msg <noi dung>       - Gửi tin cho cả phòng
- *   /pmsg <nick> <tin>    - Gửi tin riêng
- *   /op <nick>            - Chuyển quyền OP
- *   /kick <nick>          - Kick người dùng (chỉ OP)
- *   /topic <chu de>       - Đặt chủ đề (chỉ OP)
- *   /quit                 - Thoát
- *   /help                 - Hướng dẫn
- *   <noi dung>            - Tương đương /msg (gửi cho cả phòng)
+ *   /join <nick>        - Tham gia phòng
+ *   /msg <nội dung>     - Gửi cho cả phòng
+ *   /pmsg <nick> <tin>  - Nhắn riêng
+ *   /op <nick>          - Nhường quyền OP
+ *   /kick <nick>        - Kick (chỉ OP)
+ *   /topic <chủ đề>     - Đặt chủ đề (chỉ OP)
+ *   /quit               - Thoát
+ *   /help               - Hướng dẫn
+ *   <text>              - Gửi cho cả phòng (= /msg)
  */
 
 #include <stdio.h>
@@ -38,7 +49,6 @@ static void raw_send(const char *msg) {
     send(g_sock, msg, strlen(msg), 0);
 }
 
-/* ===== Thread nhận từ server ===== */
 static void *recv_thread(void *arg) {
     (void)arg;
     char buf[BUF_SIZE];
@@ -60,11 +70,19 @@ static void *recv_thread(void *arg) {
                 if (llen > 0 && line[llen-1] == '\r') line[--llen] = '\0';
                 if (llen == 0) { llen = 0; continue; }
 
-                /* Parse thông điệp server */
-                if (strncmp(line, "JOIN ", 5) == 0) {
+                if (strcmp(line, "100 OK") == 0) {
+                    printf("\n  [OK]\n> ");
+                } else if (strcmp(line, "200 NICKNAME IN USE") == 0) {
+                    printf("\n  [LOI] Nickname da duoc su dung!\n> ");
+                } else if (strcmp(line, "201 INVALID NICK NAME") == 0) {
+                    printf("\n  [LOI] Nickname khong hop le! (chi chu thuong a-z, 0-9)\n> ");
+                } else if (strcmp(line, "202 UNKNOWN NICKNAME") == 0) {
+                    printf("\n  [LOI] Nguoi dung khong ton tai!\n> ");
+                } else if (strcmp(line, "203 DENIED") == 0) {
+                    printf("\n  [LOI] Khong co quyen thuc hien!\n> ");
+                } else if (strncmp(line, "JOIN ", 5) == 0) {
                     printf("\n  *** %s da tham gia phong ***\n> ", line+5);
                 } else if (strncmp(line, "MSG ", 4) == 0) {
-                    /* MSG <nick> <noi dung> */
                     char from[NAME_LEN], msg[BUF_SIZE];
                     if (sscanf(line+4, "%63s %[^\n]", from, msg) == 2)
                         printf("\n  [%s] %s\n> ", from, msg);
@@ -77,23 +95,21 @@ static void *recv_thread(void *arg) {
                     else
                         printf("\n  [PM] %s\n> ", line+5);
                 } else if (strncmp(line, "OP ", 3) == 0) {
-                    printf("\n  *** %s la chu phong ***\n> ", line+3);
+                    printf("\n  *** Chu phong moi: %s ***\n> ", line+3);
                 } else if (strncmp(line, "KICK ", 5) == 0) {
                     char kicked[NAME_LEN], by[NAME_LEN];
                     if (sscanf(line+5, "%63s %63s", kicked, by) == 2)
                         printf("\n  *** %s bi kick boi %s ***\n> ", kicked, by);
                     else
-                        printf("\n  *** %s ***\n> ", line+5);
+                        printf("\n  *** KICK: %s ***\n> ", line+5);
                 } else if (strncmp(line, "TOPIC ", 6) == 0) {
                     char op[NAME_LEN], topic[BUF_SIZE];
                     if (sscanf(line+6, "%63s %[^\n]", op, topic) == 2)
-                        printf("\n  *** Chu de moi [%s]: %s ***\n> ", op, topic);
+                        printf("\n  *** [%s] Chu de: %s ***\n> ", op, topic);
                     else
                         printf("\n  *** Chu de: %s ***\n> ", line+6);
                 } else if (strncmp(line, "QUIT ", 5) == 0) {
                     printf("\n  *** %s da roi phong ***\n> ", line+5);
-                } else if (strncmp(line, "ERROR ", 6) == 0) {
-                    printf("\n  [LOI] %s\n> ", line+6);
                 } else {
                     printf("\n  %s\n> ", line);
                 }
@@ -108,24 +124,24 @@ static void *recv_thread(void *arg) {
 }
 
 static void print_help(void) {
-    printf("\n+------------------------------------------------+\n");
-    printf("|          CHAT CLIENT - HUONG DAN              |\n");
-    printf("+------------------------------------------------+\n");
-    printf("| /join <nick>         - Tham gia phong chat    |\n");
-    printf("| /msg <noi dung>      - Gui tin cho ca phong   |\n");
-    printf("| /pmsg <nick> <tin>   - Gui tin nhan rieng     |\n");
-    printf("| /op <nick>           - Chuyen quyen chu phong |\n");
-    printf("| /kick <nick>         - Dua nguoi dung ra      |\n");
-    printf("| /topic <chu de>      - Dat chu de phong       |\n");
-    printf("| /quit                - Thoat                  |\n");
-    printf("| /help                - Hien thi huong dan     |\n");
-    printf("| <noi dung>           - Gui cho ca phong       |\n");
-    printf("+------------------------------------------------+\n\n");
+    printf("\n+--------------------------------------------------+\n");
+    printf("|            CHAT CLIENT - HUONG DAN              |\n");
+    printf("+--------------------------------------------------+\n");
+    printf("| /join <nick>          - Tham gia phong chat     |\n");
+    printf("| /msg <noi dung>       - Gui tin cho ca phong    |\n");
+    printf("| /pmsg <nick> <tin>    - Gui tin nhan rieng      |\n");
+    printf("| /op <nick>            - Chuyen quyen chu phong  |\n");
+    printf("| /kick <nick>          - Dua nguoi dung ra       |\n");
+    printf("| /topic <chu de>       - Dat chu de phong        |\n");
+    printf("| /quit                 - Thoat                   |\n");
+    printf("| /help                 - Hien thi huong dan      |\n");
+    printf("| <noi dung>            - Gui cho ca phong        |\n");
+    printf("+--------------------------------------------------+\n\n");
 }
 
 int main(int argc, char *argv[]) {
     const char *host = "127.0.0.1";
-    int         port = 8080;
+    int         port = 9000;
     if (argc >= 2) host = argv[1];
     if (argc >= 3) port = atoi(argv[2]);
 
@@ -146,17 +162,17 @@ int main(int argc, char *argv[]) {
         perror("connect"); exit(1);
     }
 
-    printf("================================================\n");
+    printf("==================================================\n");
     printf("  DA KET NOI DEN %s:%d\n", host, port);
-    printf("================================================\n");
+    printf("==================================================\n");
     print_help();
 
     pthread_t tid;
     pthread_create(&tid, NULL, recv_thread, NULL);
     pthread_detach(tid);
 
-    char  input[BUF_SIZE];
-    char  cmdbuf[BUF_SIZE + 32];
+    char input[BUF_SIZE];
+    char cmdbuf[BUF_SIZE + 32];
 
     printf("> ");
     fflush(stdout);
@@ -172,50 +188,41 @@ int main(int argc, char *argv[]) {
                 snprintf(cmdbuf, sizeof(cmdbuf), "JOIN %s\n", nick);
                 strncpy(g_nick, nick, NAME_LEN-1);
                 raw_send(cmdbuf);
-
             } else if (strncmp(input, "/msg ", 5) == 0) {
                 snprintf(cmdbuf, sizeof(cmdbuf), "MSG %s\n", input+5);
                 raw_send(cmdbuf);
-
             } else if (strncmp(input, "/pmsg ", 6) == 0) {
                 char to[NAME_LEN], msg[BUF_SIZE];
                 if (sscanf(input+6, "%63s %[^\n]", to, msg) == 2) {
                     snprintf(cmdbuf, sizeof(cmdbuf), "PMSG %s %s\n", to, msg);
                     raw_send(cmdbuf);
                 } else printf("[!] Cu phap: /pmsg <nick> <tin nhan>\n");
-
             } else if (strncmp(input, "/op ", 4) == 0) {
                 char nick[NAME_LEN];
                 sscanf(input+4, "%63s", nick);
                 snprintf(cmdbuf, sizeof(cmdbuf), "OP %s\n", nick);
                 raw_send(cmdbuf);
-
             } else if (strncmp(input, "/kick ", 6) == 0) {
                 char nick[NAME_LEN];
                 sscanf(input+6, "%63s", nick);
                 snprintf(cmdbuf, sizeof(cmdbuf), "KICK %s\n", nick);
                 raw_send(cmdbuf);
-
             } else if (strncmp(input, "/topic ", 7) == 0) {
                 snprintf(cmdbuf, sizeof(cmdbuf), "TOPIC %s\n", input+7);
                 raw_send(cmdbuf);
-
             } else if (strcmp(input, "/quit") == 0) {
                 raw_send("QUIT\n");
                 g_running = 0;
                 break;
-
             } else if (strcmp(input, "/help") == 0) {
                 print_help();
-
             } else {
-                printf("[!] Lenh khong hop le. Go /help de xem\n");
+                printf("[!] Lenh khong hop le. Go /help\n");
             }
         } else {
-            /* Gõ thẳng = broadcast */
-            if (!g_nick[0]) {
+            if (!g_nick[0])
                 printf("[!] Chua tham gia phong. Dung: /join <nick>\n");
-            } else {
+            else {
                 snprintf(cmdbuf, sizeof(cmdbuf), "MSG %s\n", input);
                 raw_send(cmdbuf);
             }

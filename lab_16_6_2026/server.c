@@ -1,37 +1,52 @@
 /*
  * Chat Server - TCP/IP
- * Giao thức theo slide:
+ * Giao thức CHÍNH XÁC theo file test:
  *
  * CLIENT -> SERVER:
  *   JOIN <nickname>
- *   MSG <room message>
+ *   MSG <message>
  *   PMSG <nickname> <message>
  *   OP <nickname>
  *   KICK <nickname>
  *   TOPIC <topic>
  *   QUIT
  *
- * SERVER -> ALL CLIENTS (broadcast):
- *   JOIN <nickname>
- *   MSG <nickname> <room message>
- *   PMSG <nickname> <message>       (chỉ gửi cho người nhận)
- *   OP <nickname>
- *   KICK <kicked nickname> <op nickname>
- *   TOPIC <op nickname> <topic>
- *   QUIT <nickname>
+ * SERVER -> CLIENT (người gửi):
+ *   100 OK\n             - lệnh thành công
+ *   200 NICKNAME IN USE\n
+ *   201 INVALID NICK NAME\n
+ *   202 UNKNOWN NICKNAME\n
+ *   203 DENIED\n
+ *
+ * SERVER -> ALL (broadcast, KHÔNG gửi lại người gửi):
+ *   JOIN <nickname>\n
+ *   MSG <nickname> <message>\n
+ *   PMSG <nickname> <message>\n   (chỉ gửi người nhận)
+ *   OP <nickname>\n
+ *   KICK <kicked> <op>\n
+ *   TOPIC <op> <topic>\n
+ *   QUIT <nickname>\n
+ *
+ * Lưu ý:
+ *   - Người gửi JOIN nhận "100 OK\n", người KHÁC nhận "JOIN <nick>\n"
+ *   - Nickname phải là chữ thường a-z, 0-9, không chứa chữ hoa -> 201
+ *   - Nickname trùng -> 200
+ *   - Nickname không tồn tại -> 202
+ *   - Không phải OP -> 203
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <ctype.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#define PORT        8080
+#define PORT        9000
 #define MAX_CLIENTS 50
 #define BUF_SIZE    4096
 #define NAME_LEN    64
@@ -39,13 +54,13 @@
 typedef struct {
     int  fd;
     char nick[NAME_LEN];
-    int  active;       /* 1 = đã JOIN */
+    int  active;
     struct sockaddr_in addr;
 } Client;
 
 static Client clients[MAX_CLIENTS];
 static int    client_count = 0;
-static char   op_nick[NAME_LEN] = "";   /* Chủ phòng hiện tại */
+static char   op_nick[NAME_LEN] = "";
 static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
 
 /* ===== Tiện ích ===== */
@@ -53,21 +68,14 @@ static void send_fd(int fd, const char *msg) {
     send(fd, msg, strlen(msg), 0);
 }
 
-/* Gửi cho tất cả client đang active */
-static void broadcast(const char *msg) {
+/* Gửi cho tất cả NGOẠI TRỪ fd */
+static void broadcast_except(int exclude_fd, const char *msg) {
     for (int i = 0; i < client_count; i++)
-        if (clients[i].active)
+        if (clients[i].active && clients[i].fd != exclude_fd)
             send_fd(clients[i].fd, msg);
 }
 
-/* Gửi cho tất cả TRỪ fd */
-static void broadcast_except(int fd, const char *msg) {
-    for (int i = 0; i < client_count; i++)
-        if (clients[i].active && clients[i].fd != fd)
-            send_fd(clients[i].fd, msg);
-}
-
-/* Tìm theo nick */
+/* Tìm theo nick (phải giữ lock trước) */
 static int find_nick(const char *nick) {
     for (int i = 0; i < client_count; i++)
         if (clients[i].active && strcmp(clients[i].nick, nick) == 0)
@@ -87,72 +95,86 @@ static int is_op(const char *nick) {
     return strcmp(op_nick, nick) == 0;
 }
 
+/* Kiểm tra nickname hợp lệ: chỉ chữ thường và số */
+static int valid_nick(const char *nick) {
+    if (!nick || !nick[0]) return 0;
+    for (int i = 0; nick[i]; i++) {
+        if (!islower((unsigned char)nick[i]) && !isdigit((unsigned char)nick[i]))
+            return 0;
+    }
+    return 1;
+}
+
 /* ===== Xử lý lệnh ===== */
+
 static void handle_join(int fd, int idx, char *args) {
     char nick[NAME_LEN] = {0};
-    sscanf(args, "%63s", nick);
-    if (!nick[0]) { send_fd(fd, "ERROR Thieu nickname\n"); return; }
+    if (args) sscanf(args, "%63s", nick);
 
-    pthread_mutex_lock(&mtx);
-    if (clients[idx].active) {
-        pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Ban da tham gia roi\n");
+    /* Validate nickname */
+    if (!valid_nick(nick)) {
+        send_fd(fd, "201 INVALID NICK NAME\n");
         return;
     }
+
+    pthread_mutex_lock(&mtx);
+
+    if (clients[idx].active) {
+        pthread_mutex_unlock(&mtx);
+        send_fd(fd, "201 INVALID NICK NAME\n");
+        return;
+    }
+
     if (find_nick(nick) != -1) {
         pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Nickname da ton tai\n");
+        send_fd(fd, "200 NICKNAME IN USE\n");
         return;
     }
 
     strncpy(clients[idx].nick, nick, NAME_LEN - 1);
     clients[idx].active = 1;
 
-    /* Người đầu tiên vào là OP */
-    int no_op = (op_nick[0] == '\0');
-    if (no_op) strncpy(op_nick, nick, NAME_LEN - 1);
+    int first = (op_nick[0] == '\0');
+    if (first) strncpy(op_nick, nick, NAME_LEN - 1);
 
-    /* Broadcast JOIN <nickname> */
+    /* Trả 100 OK cho người join */
+    send_fd(fd, "100 OK\n");
+
+    /* Broadcast JOIN cho người khác */
     char buf[BUF_SIZE];
     snprintf(buf, sizeof(buf), "JOIN %s\n", nick);
-    broadcast(buf);  /* Gửi cả cho người vừa join */
+    broadcast_except(fd, buf);
+
     pthread_mutex_unlock(&mtx);
 
-    if (no_op) {
-        /* Thông báo OP cho người mới */
-        char op_msg[BUF_SIZE];
-        snprintf(op_msg, sizeof(op_msg), "OP %s\n", nick);
-        pthread_mutex_lock(&mtx);
-        broadcast(op_msg);
-        pthread_mutex_unlock(&mtx);
-    }
-
-    printf("[JOIN] %s (%s)\n", nick, inet_ntoa(clients[idx].addr.sin_addr));
+    printf("[JOIN] %s\n", nick);
 }
 
 static void handle_msg(int fd, int idx, char *args) {
     pthread_mutex_lock(&mtx);
     if (!clients[idx].active) {
         pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Chua tham gia phong\n");
+        send_fd(fd, "203 DENIED\n");
         return;
     }
     char nick[NAME_LEN];
     strncpy(nick, clients[idx].nick, NAME_LEN - 1);
     pthread_mutex_unlock(&mtx);
 
-    if (!args || !args[0]) { send_fd(fd, "ERROR Tin nhan trong\n"); return; }
+    if (!args || !args[0]) { send_fd(fd, "203 DENIED\n"); return; }
 
-    /* Cắt \r\n */
     char msg[BUF_SIZE];
     strncpy(msg, args, sizeof(msg) - 1);
     msg[strcspn(msg, "\r\n")] = '\0';
 
+    /* Trả 100 OK cho người gửi */
+    send_fd(fd, "100 OK\n");
+
+    /* Broadcast MSG <nick> <msg> cho người khác */
     char buf[BUF_SIZE];
     snprintf(buf, sizeof(buf), "MSG %s %s\n", nick, msg);
-
     pthread_mutex_lock(&mtx);
-    broadcast(buf);
+    broadcast_except(fd, buf);
     pthread_mutex_unlock(&mtx);
 
     printf("[MSG] %s: %s\n", nick, msg);
@@ -162,16 +184,17 @@ static void handle_pmsg(int fd, int idx, char *args) {
     pthread_mutex_lock(&mtx);
     if (!clients[idx].active) {
         pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Chua tham gia phong\n");
+        send_fd(fd, "203 DENIED\n");
         return;
     }
     char from[NAME_LEN];
     strncpy(from, clients[idx].nick, NAME_LEN - 1);
     pthread_mutex_unlock(&mtx);
 
-    char to[NAME_LEN], msg[BUF_SIZE];
-    if (sscanf(args, "%63s %[^\n]", to, msg) < 2) {
-        send_fd(fd, "ERROR Cu phap: PMSG <nick> <message>\n");
+    char to[NAME_LEN] = {0};
+    char msg[BUF_SIZE] = {0};
+    if (!args || sscanf(args, "%63s %[^\n]", to, msg) < 2) {
+        send_fd(fd, "202 UNKNOWN NICKNAME\n");
         return;
     }
 
@@ -179,14 +202,17 @@ static void handle_pmsg(int fd, int idx, char *args) {
     int tidx = find_nick(to);
     if (tidx == -1) {
         pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Nguoi dung khong ton tai\n");
+        send_fd(fd, "202 UNKNOWN NICKNAME\n");
         return;
     }
+
+    /* Trả 100 OK cho người gửi */
+    send_fd(fd, "100 OK\n");
+
+    /* Gửi PMSG <from> <msg> cho người nhận */
     char buf[BUF_SIZE];
     snprintf(buf, sizeof(buf), "PMSG %s %s\n", from, msg);
     send_fd(clients[tidx].fd, buf);
-    /* Cũng gửi lại cho người gửi để họ thấy tin nhắn của mình */
-    send_fd(fd, buf);
     pthread_mutex_unlock(&mtx);
 
     printf("[PMSG] %s -> %s: %s\n", from, to, msg);
@@ -196,31 +222,33 @@ static void handle_op(int fd, int idx, char *args) {
     pthread_mutex_lock(&mtx);
     if (!clients[idx].active) {
         pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Chua tham gia phong\n");
+        send_fd(fd, "203 DENIED\n");
         return;
     }
     if (!is_op(clients[idx].nick)) {
         pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Ban khong phai chu phong\n");
+        send_fd(fd, "203 DENIED\n");
         return;
     }
+
     char new_op[NAME_LEN] = {0};
-    sscanf(args, "%63s", new_op);
-    if (!new_op[0]) {
-        pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Thieu nickname\n");
-        return;
-    }
+    if (args) sscanf(args, "%63s", new_op);
+
     if (find_nick(new_op) == -1) {
         pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Nguoi dung khong ton tai\n");
+        send_fd(fd, "202 UNKNOWN NICKNAME\n");
         return;
     }
+
     strncpy(op_nick, new_op, NAME_LEN - 1);
 
+    /* Trả 100 OK cho người gửi */
+    send_fd(fd, "100 OK\n");
+
+    /* Broadcast OP <new_op> cho người khác */
     char buf[BUF_SIZE];
     snprintf(buf, sizeof(buf), "OP %s\n", new_op);
-    broadcast(buf);
+    broadcast_except(fd, buf);
     pthread_mutex_unlock(&mtx);
 
     printf("[OP] Chu phong moi: %s\n", new_op);
@@ -230,68 +258,81 @@ static void handle_kick(int fd, int idx, char *args) {
     pthread_mutex_lock(&mtx);
     if (!clients[idx].active) {
         pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Chua tham gia phong\n");
+        send_fd(fd, "203 DENIED\n");
         return;
     }
     if (!is_op(clients[idx].nick)) {
         pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Ban khong phai chu phong\n");
+        send_fd(fd, "203 DENIED\n");
         return;
     }
+
     char kicked[NAME_LEN] = {0};
-    sscanf(args, "%63s", kicked);
-    if (!kicked[0]) {
-        pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Thieu nickname\n");
-        return;
-    }
+    if (args) sscanf(args, "%63s", kicked);
+
     int kidx = find_nick(kicked);
     if (kidx == -1) {
         pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Nguoi dung khong ton tai\n");
+        send_fd(fd, "202 UNKNOWN NICKNAME\n");
         return;
     }
 
-    char buf[BUF_SIZE];
-    snprintf(buf, sizeof(buf), "KICK %s %s\n", kicked, clients[idx].nick);
-    broadcast(buf);
+    char op_name[NAME_LEN];
+    strncpy(op_name, clients[idx].nick, NAME_LEN - 1);
 
-    /* Đánh dấu người bị kick là không active, đóng kết nối */
+    /* Trả 100 OK cho OP */
+    send_fd(fd, "100 OK\n");
+
+    /* Broadcast KICK <kicked> <op> cho người khác (kể cả người bị kick) */
+    char buf[BUF_SIZE];
+    snprintf(buf, sizeof(buf), "KICK %s %s\n", kicked, op_name);
+    broadcast_except(fd, buf);  /* gửi tất cả ngoại trừ OP */
+
+    /* Đánh dấu và đóng kết nối người bị kick */
     int kicked_fd = clients[kidx].fd;
     clients[kidx].active = 0;
     pthread_mutex_unlock(&mtx);
 
     close(kicked_fd);
-    printf("[KICK] %s bi kick boi %s\n", kicked, clients[idx].nick);
+    printf("[KICK] %s bi kick boi %s\n", kicked, op_name);
 }
 
 static void handle_topic(int fd, int idx, char *args) {
     pthread_mutex_lock(&mtx);
     if (!clients[idx].active) {
         pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Chua tham gia phong\n");
+        send_fd(fd, "203 DENIED\n");
         return;
     }
     if (!is_op(clients[idx].nick)) {
         pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Ban khong phai chu phong\n");
+        send_fd(fd, "203 DENIED\n");
         return;
     }
-    char topic[BUF_SIZE];
+
     if (!args || !args[0]) {
         pthread_mutex_unlock(&mtx);
-        send_fd(fd, "ERROR Thieu chu de\n");
+        send_fd(fd, "203 DENIED\n");
         return;
     }
+
+    char topic[BUF_SIZE];
     strncpy(topic, args, sizeof(topic) - 1);
     topic[strcspn(topic, "\r\n")] = '\0';
 
+    char nick[NAME_LEN];
+    strncpy(nick, clients[idx].nick, NAME_LEN - 1);
+
+    /* Trả 100 OK cho người gửi */
+    send_fd(fd, "100 OK\n");
+
+    /* Broadcast TOPIC <op> <topic> cho người khác */
     char buf[BUF_SIZE];
-    snprintf(buf, sizeof(buf), "TOPIC %s %s\n", clients[idx].nick, topic);
-    broadcast(buf);
+    snprintf(buf, sizeof(buf), "TOPIC %s %s\n", nick, topic);
+    broadcast_except(fd, buf);
     pthread_mutex_unlock(&mtx);
 
-    printf("[TOPIC] %s dat chu de: %s\n", clients[idx].nick, topic);
+    printf("[TOPIC] %s: %s\n", nick, topic);
 }
 
 static void handle_quit(int fd, int idx) {
@@ -300,15 +341,20 @@ static void handle_quit(int fd, int idx) {
         pthread_mutex_unlock(&mtx);
         return;
     }
+
     char nick[NAME_LEN];
     strncpy(nick, clients[idx].nick, NAME_LEN - 1);
     clients[idx].active = 0;
 
+    /* Trả 100 OK cho người quit */
+    send_fd(fd, "100 OK\n");
+
+    /* Broadcast QUIT <nick> cho người khác */
     char buf[BUF_SIZE];
     snprintf(buf, sizeof(buf), "QUIT %s\n", nick);
     broadcast_except(fd, buf);
 
-    /* Nếu OP quit, chuyển OP cho người đầu tiên còn lại */
+    /* Nếu OP quit -> chuyển OP */
     if (is_op(nick)) {
         op_nick[0] = '\0';
         for (int i = 0; i < client_count; i++) {
@@ -331,9 +377,9 @@ static void *client_thread(void *arg) {
     int fd = *(int *)arg;
     free(arg);
 
-    char  buf[BUF_SIZE];
-    char  line[BUF_SIZE];
-    int   llen = 0;
+    char buf[BUF_SIZE];
+    char line[BUF_SIZE];
+    int  llen = 0;
 
     while (1) {
         int n = recv(fd, buf, sizeof(buf) - 1, 0);
@@ -344,14 +390,13 @@ static void *client_thread(void *arg) {
             if (buf[i] == '\n') {
                 line[llen] = '\0';
                 if (llen > 0 && line[llen-1] == '\r') line[--llen] = '\0';
-
                 if (llen == 0) { llen = 0; continue; }
+
                 printf("[RECV fd=%d] %s\n", fd, line);
 
-                /* Tách lệnh và tham số */
                 char cmd[32] = {0};
-                char *sp = strchr(line, ' ');
-                char *args = NULL;
+                char *args   = NULL;
+                char *sp     = strchr(line, ' ');
                 if (sp) {
                     int cl = sp - line < 31 ? sp - line : 31;
                     strncpy(cmd, line, cl);
@@ -363,19 +408,18 @@ static void *client_thread(void *arg) {
                 pthread_mutex_lock(&mtx);
                 int idx = find_fd(fd);
                 pthread_mutex_unlock(&mtx);
-                if (idx == -1) break;
+                if (idx == -1) goto done;
 
-                if      (strcmp(cmd, "JOIN")  == 0) handle_join(fd, idx, args ? args : "");
-                else if (strcmp(cmd, "MSG")   == 0) handle_msg(fd, idx, args ? args : "");
-                else if (strcmp(cmd, "PMSG")  == 0) handle_pmsg(fd, idx, args ? args : "");
-                else if (strcmp(cmd, "OP")    == 0) handle_op(fd, idx, args ? args : "");
-                else if (strcmp(cmd, "KICK")  == 0) handle_kick(fd, idx, args ? args : "");
-                else if (strcmp(cmd, "TOPIC") == 0) handle_topic(fd, idx, args ? args : "");
+                if      (strcmp(cmd, "JOIN")  == 0) handle_join(fd, idx, args);
+                else if (strcmp(cmd, "MSG")   == 0) handle_msg(fd, idx, args);
+                else if (strcmp(cmd, "PMSG")  == 0) handle_pmsg(fd, idx, args);
+                else if (strcmp(cmd, "OP")    == 0) handle_op(fd, idx, args);
+                else if (strcmp(cmd, "KICK")  == 0) handle_kick(fd, idx, args);
+                else if (strcmp(cmd, "TOPIC") == 0) handle_topic(fd, idx, args);
                 else if (strcmp(cmd, "QUIT")  == 0) {
                     handle_quit(fd, idx);
                     goto done;
                 }
-                else send_fd(fd, "ERROR Lenh khong hop le\n");
 
                 llen = 0;
             } else {
@@ -385,16 +429,32 @@ static void *client_thread(void *arg) {
     }
 
 done:
-    /* Xử lý ngắt kết nối đột ngột */
+    /* Ngắt kết nối đột ngột */
     pthread_mutex_lock(&mtx);
     int idx = find_fd(fd);
-    if (idx != -1 && clients[idx].active) {
-        pthread_mutex_unlock(&mtx);
-        handle_quit(fd, idx);
-        pthread_mutex_lock(&mtx);
-    }
-    /* Xóa khỏi danh sách */
     if (idx != -1) {
+        if (clients[idx].active) {
+            char nick[NAME_LEN];
+            strncpy(nick, clients[idx].nick, NAME_LEN - 1);
+            clients[idx].active = 0;
+
+            char buf2[BUF_SIZE];
+            snprintf(buf2, sizeof(buf2), "QUIT %s\n", nick);
+            broadcast_except(fd, buf2);
+
+            if (is_op(nick)) {
+                op_nick[0] = '\0';
+                for (int i = 0; i < client_count; i++) {
+                    if (clients[i].active && clients[i].fd != fd) {
+                        strncpy(op_nick, clients[i].nick, NAME_LEN - 1);
+                        char op_msg[BUF_SIZE];
+                        snprintf(op_msg, sizeof(op_msg), "OP %s\n", op_nick);
+                        broadcast_except(fd, op_msg);
+                        break;
+                    }
+                }
+            }
+        }
         for (int i = idx; i < client_count - 1; i++)
             clients[i] = clients[i+1];
         client_count--;
@@ -428,7 +488,7 @@ int main(int argc, char *argv[]) {
 
     printf("============================================\n");
     printf("  Chat Server dang chay tren port %d\n", port);
-    printf("  Giao thuc: JOIN MSG PMSG OP KICK TOPIC QUIT\n");
+    printf("  Protocol: JOIN MSG PMSG OP KICK TOPIC QUIT\n");
     printf("============================================\n");
 
     while (1) {
@@ -440,7 +500,6 @@ int main(int argc, char *argv[]) {
         pthread_mutex_lock(&mtx);
         if (client_count >= MAX_CLIENTS) {
             pthread_mutex_unlock(&mtx);
-            send_fd(cfd, "ERROR Server day\n");
             close(cfd);
             continue;
         }
